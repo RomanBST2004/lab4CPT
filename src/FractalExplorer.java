@@ -1,5 +1,7 @@
 import java.awt.geom.Rectangle2D;
+import java.awt.geom.Rectangle2D.Double;
 import java.awt.event.*;
+import javax.swing.JFileChooser.*;
 import javax.swing.filechooser.*;
 import java.awt.image.*;
 import java.awt.*;
@@ -7,10 +9,15 @@ import javax.swing.*;
 
 public class FractalExplorer {
 
+    // Элементы, которые будут блокироваться при процессе вычисления
+    private JComboBox comboBox;
+    private JButton button_reset;
+    private JButton button_save;
+
     // Размер экрана 
     private int size;
 
-    // Ссылка на изображение 
+    // Ссылка на изображение
     private JImageDisplay image;
 
     // Ссылка на объект фрактал
@@ -18,8 +25,11 @@ public class FractalExplorer {
 
     // Показываемый диапазон в комплексной области
     private Rectangle2D.Double range;
+    
+    // Количество оставшихся строк для подсчёта цвета точек
+    private int rowsRemaining;
 
-    // Конструктор класса
+   // Конструктор класса
     public FractalExplorer(int new_size) {
         this.size = new_size;
         range = new Rectangle2D.Double();
@@ -37,9 +47,9 @@ public class FractalExplorer {
         frame.setLayout(new BorderLayout());
 
         // Инициализация элементов
-        JComboBox<FractalGenerator> comboBox = new JComboBox<>();
-        JButton button_reset = new JButton("Reset");
-        JButton button_save = new JButton("Save");
+        comboBox = new JComboBox();
+        button_reset = new JButton("Reset");
+        button_save = new JButton("Save");
         JPanel bottom_panel = new JPanel();
         JPanel top_panel = new JPanel();
         JLabel lable = new JLabel("Fractal: ");
@@ -81,28 +91,19 @@ public class FractalExplorer {
 
     // Отрисовка фрактала
     public void drawFractal() {
-        double xCoord;
-        double yCoord;
-        int x;
-        int y;
-        int iterations_number;
-        for (x = 0; x < size; x++) {
-            for (y = 0; y < size; y++) {
-                xCoord = FractalGenerator.getCoord(range.x, range.x + range.width, size, x);
-                yCoord = FractalGenerator.getCoord(range.y, range.y + range.height, size, y);
-                iterations_number = generator.numIterations(xCoord, yCoord);
-                float hue = 0.7f + (float) iterations_number / 200f;
-                int rgbColor = Color.HSBtoRGB(hue, 1f, 1f);
-                if (iterations_number == -1){
-                    image.drawPixel(x, y, 0);
-                    image.repaint();
-                }
-                else{
-                    image.drawPixel(x, y, rgbColor);
-                    image.repaint();
-                }
-            }
-        }
+         enableUI(false);
+         rowsRemaining = size;
+         for (int x = 0; x < size; x++){
+             FractalWorker drawRow = new FractalWorker(x);
+             drawRow.execute();
+         }
+    }
+
+    // Метод для вкл/выкл элементов интерфейса во время вычисления 
+    private void enableUI(boolean value) {
+        comboBox.setEnabled(value);
+        button_reset.setEnabled(value);
+        button_save.setEnabled(value);
     }
 
     // Подкласс для перерисовки фрактала
@@ -118,10 +119,13 @@ public class FractalExplorer {
 
         @Override
         public void mousePressed(MouseEvent e) {
+            if (rowsRemaining != 0) {
+                return;
+            }
             int x = e.getX();
             int y = e.getY();
-            double xCoord = FractalGenerator.getCoord(range.x, range.x +range.width, size, x);
-            double yCoord = FractalGenerator.getCoord(range.y, range.y +range.height, size, y);
+            double xCoord = generator.getCoord(range.x, range.x +range.width, size, x);
+            double yCoord = generator.getCoord(range.y, range.y +range.height, size, y);
             generator.recenterAndZoomRange(range,xCoord, yCoord, 0.5);
             FractalExplorer.this.drawFractal();
         }
@@ -130,14 +134,14 @@ public class FractalExplorer {
     // Подкласс для переключения фракталов
     private class ChooseFractal implements ActionListener {
         public void actionPerformed(ActionEvent e) {
-            JComboBox<FractalGenerator> target = (JComboBox<FractalGenerator>) e.getSource();
+            JComboBox target = (JComboBox) e.getSource();
             generator = (FractalGenerator) target.getSelectedItem();
             generator.getInitialRange(range);
             FractalExplorer.this.drawFractal();
         }
     }
 
-   // Подкласс для сохранения изображения
+    // Подкласс для сохранения изображения
     private class SaveImage implements ActionListener {
         public void actionPerformed(ActionEvent e) {
             JFileChooser chooser = new JFileChooser();
@@ -147,6 +151,7 @@ public class FractalExplorer {
             int userSelection = chooser.showSaveDialog(image);
             if (userSelection == JFileChooser.APPROVE_OPTION) {
                 java.io.File file = chooser.getSelectedFile();
+                String file_name = file.toString();
                 try {
                     BufferedImage displayImage = image.getImage();
                     javax.imageio.ImageIO.write(displayImage, "png", file);
@@ -154,6 +159,58 @@ public class FractalExplorer {
                 catch (Exception exception) {
                     JOptionPane.showMessageDialog(image, exception.getMessage(), "Cannot Save Image", JOptionPane.ERROR_MESSAGE);
                 }
+            }
+        }
+    }
+
+    // Подкласс для многопоточной отрисовки фракталов 
+    private class FractalWorker extends SwingWorker<Object, Object> {
+
+        // y-координата вычисляемой строки для потока 
+        int yCoordinate;
+
+        // Массив хранения цветов точек  строки
+        int[] RGB_arr;
+
+       // Конструкток внутреннего класса, получающий y-координату
+        private FractalWorker(int target_row) {
+            yCoordinate = target_row;
+        }
+
+        // Метод, который выполняет фоновые операции, 
+        // вычисляет значения цветов точек для строки
+        protected Object doInBackground() {
+            
+            RGB_arr = new int[size];
+            double xCoord;
+            double yCoord;
+            int iteration;
+            for (int i = 0; i < RGB_arr.length; i++) {
+                xCoord = generator.getCoord(range.x, range.x + range.width, size, i);
+                yCoord = generator.getCoord(range.y, range.y + range.height, size, yCoordinate);
+                iteration = generator.numIterations(xCoord, yCoord);
+                if (iteration == -1){
+                    RGB_arr[i] = 0;
+                }
+                else {
+                    float hue = 0.7f + (float) iteration / 200f;
+                    int rgbColor = Color.HSBtoRGB(hue, 1f, 1f);
+                    RGB_arr[i] = rgbColor;
+                }
+            }
+            return null;
+        }
+
+        // Метод, который рисует данную строку,
+        // когда фоновая задача завершена
+        protected void done() {
+            for (int i = 0; i < RGB_arr.length; i++) {
+                image.drawPixel(i, yCoordinate, RGB_arr[i]);
+            }
+            image.repaint(0, 0, yCoordinate, size, 1);
+            rowsRemaining--;
+            if (rowsRemaining == 0) {
+                enableUI(true);
             }
         }
     }
